@@ -1,0 +1,220 @@
+import streamlit as st
+import sqlite3
+import random
+import time
+import datetime
+import pandas as pd
+from streamlit_autorefresh import st_autorefresh
+import hashlib # 비밀번호 해싱을 위해 추가
+
+# --- 시간대 설정 (한국시간) ---
+KST = datetime.timezone(datetime.timedelta(hours=9))
+
+def now_kst():
+    return datetime.datetime.now(KST)
+
+# --- 1. 설정 및 데이터베이스 초기화 ---
+def setup_database():
+    conn = sqlite3.connect('lottery_data_v2.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute("PRAGMA foreign_keys = ON;")
+    # lotteries 테이블에 비밀번호 해시 컬럼 추가
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS lotteries (
+            id INTEGER PRIMARY KEY, title TEXT NOT NULL, draw_time TIMESTAMP, num_winners INTEGER, status TEXT, 
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, password_hash TEXT NOT NULL
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS participants (id INTEGER PRIMARY KEY, lottery_id INTEGER, name TEXT NOT NULL, FOREIGN KEY (lottery_id) REFERENCES lotteries (id) ON DELETE CASCADE)
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS winners (id INTEGER PRIMARY KEY, lottery_id INTEGER, winner_name TEXT, draw_round INTEGER, FOREIGN KEY (lottery_id) REFERENCES lotteries (id) ON DELETE CASCADE)
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS lottery_logs (id INTEGER PRIMARY KEY, lottery_id INTEGER, log_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, log_message TEXT, FOREIGN KEY (lottery_id) REFERENCES lotteries (id) ON DELETE CASCADE)
+    ''')
+    conn.commit()
+    return conn
+
+# --- 2. 헬퍼 및 로직 함수 ---
+def hash_password(password):
+    """비밀번호를 SHA256으로 해싱하는 함수"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def add_log(conn, lottery_id, message):
+    c = conn.cursor()
+    c.execute("INSERT INTO lottery_logs (lottery_id, log_message, log_timestamp) VALUES (?, ?, ?)", (lottery_id, message, now_kst()))
+    conn.commit()
+
+def run_draw(conn, lottery_id, num_to_draw, candidates):
+    actual = min(num_to_draw, len(candidates))
+    if actual <= 0: return []
+    winners = random.sample(candidates, k=actual)
+    c = conn.cursor()
+    c.execute("SELECT MAX(draw_round) FROM winners WHERE lottery_id = ?", (lottery_id,))
+    prev = c.fetchone()[0] or 0
+    current_round = prev + 1
+    for w in winners:
+        c.execute("INSERT INTO winners (lottery_id, winner_name, draw_round) VALUES (?, ?, ?)",(lottery_id, w, current_round))
+    if current_round == 1:
+        c.execute("UPDATE lotteries SET status = 'completed' WHERE id = ?", (lottery_id,))
+    conn.commit()
+    add_log(conn, lottery_id, f"{current_round}회차 추첨 진행. (당첨자: {', '.join(winners)})")
+    return winners
+
+def check_and_run_scheduled_draws(conn):
+    c = conn.cursor()
+    now = now_kst()
+    c.execute("SELECT id, num_winners FROM lotteries WHERE status = 'scheduled' AND draw_time <= ?", (now,))
+    for lottery_id, num_winners in c.fetchall():
+        c.execute("SELECT name FROM participants WHERE lottery_id = ?", (lottery_id,))
+        participants = [r[0] for r in c.fetchall()]
+        if participants:
+            winners = run_draw(conn, lottery_id, num_winners, participants)
+            if winners: st.session_state[f'celebrated_{lottery_id}'] = True
+
+# --- 3. Streamlit UI 구성 ---
+def main():
+    st.set_page_config(page_title="new lottery", page_icon="📜", layout="wide")
+    st_autorefresh(interval=1000, limit=None, key="main_refresher")
+    conn = setup_database()
+    check_and_run_scheduled_draws(conn)
+
+    # 세션 상태 초기화
+    st.session_state.setdefault('super_admin_auth', False)
+    st.session_state.setdefault('creator_auth', {}) # 추첨별 인증 상태 저장
+    st.session_state.setdefault('view_mode', 'list')
+    st.session_state.setdefault('selected_lottery_id', None)
+
+    st.title("📜 NEW LOTTERY")
+
+    # 최상단 슈퍼 관리자 인증
+    with st.expander("🔑 슈퍼 관리자 로그인"):
+        if not st.session_state.super_admin_auth:
+            super_pw = st.text_input("슈퍼 관리자 인증키", type="password", key="super_admin_pw")
+            if st.button("인증", key="super_admin_auth_btn"):
+                if super_pw == st.secrets.get("super_admin", {}).get("password"):
+                    st.session_state.super_admin_auth = True
+                    st.experimental_rerun()
+                else:
+                    st.error("인증키가 올바르지 않습니다.")
+        else:
+            st.success("슈퍼 관리자로 인증되었습니다. 모든 추첨에 대한 삭제 권한이 활성화됩니다.")
+
+    st.markdown("---")
+    col1, col2 = st.columns([2, 1])
+
+    with col1: # 좌측: 추첨 현황판
+        if st.session_state.view_mode == 'detail' and st.session_state.selected_lottery_id is not None:
+            if st.button("🔙 목록으로 돌아가기"):
+                st.session_state.view_mode = 'list'; st.session_state.selected_lottery_id = None; st.experimental_rerun()
+            
+            lid = st.session_state.selected_lottery_id
+            try:
+                sel_row = pd.read_sql("SELECT * FROM lotteries WHERE id = ?", conn, params=(lid,)).iloc[0]
+                title, status, draw_time_raw, pw_hash = sel_row['title'], sel_row['status'], sel_row['draw_time'], sel_row['password_hash']
+                
+                if isinstance(draw_time_raw, str): draw_time = datetime.datetime.fromisoformat(draw_time_raw)
+                else: draw_time = draw_time_raw
+                if hasattr(draw_time, 'tzinfo') and draw_time.tzinfo is None: draw_time = draw_time.replace(tzinfo=KST)
+
+                with st.container(border=True):
+                    st.header(f"✨ {title}")
+                    # ... (기존 상세 정보 표시는 동일)
+                    
+                    tabs = st.tabs(["참가자 명단", "📜 추첨 로그", "👑 관리"])
+
+                    with tabs[0]: # 참가자 명단
+                        # ...
+                    
+                    with tabs[1]: # 추첨 로그
+                        # ...
+
+                    with tabs[2]: # 관리 탭
+                        st.subheader("추첨 관리")
+                        
+                        # 슈퍼 관리자 기능
+                        if st.session_state.super_admin_auth:
+                            st.write("**슈퍼 관리자 기능: 추첨 삭제**")
+                            st.warning(f"'{title}' 추첨의 모든 기록이 영구적으로 삭제됩니다.")
+                            if st.button("이 추첨 영구 삭제", key=f"super_delete_btn_{lid}", type="primary"):
+                                c = conn.cursor()
+                                c.execute("DELETE FROM lotteries WHERE id=?", (lid,)); conn.commit()
+                                st.session_state.view_mode = 'list'; st.session_state.selected_lottery_id = None
+                                st.success("삭제 완료"); time.sleep(1); st.experimental_rerun()
+                        
+                        # 생성자 기능
+                        if status == 'completed':
+                            st.write("**생성자 기능: 재추첨**")
+                            if not st.session_state.creator_auth.get(lid, False):
+                                creator_pw = st.text_input("추첨 비밀번호 입력", type="password", key=f"creator_pw_{lid}")
+                                if st.button("재추첨 권한 인증", key=f"creator_auth_btn_{lid}"):
+                                    if hash_password(creator_pw) == pw_hash:
+                                        st.session_state.creator_auth[lid] = True
+                                        st.experimental_rerun()
+                                    else:
+                                        st.error("비밀번호가 일치하지 않습니다.")
+                            else:
+                                st.success("이 추첨에 대한 관리 권한이 인증되었습니다.")
+                                all_p = pd.read_sql("SELECT name FROM participants WHERE lottery_id=?", conn, params=(lid,))['name'].tolist()
+                                prev = pd.read_sql("SELECT winner_name FROM winners WHERE lottery_id=?", conn, params=(lid,))['winner_name'].tolist()
+                                cand = [p for p in all_p if p not in prev]
+                                if cand:
+                                    chosen = st.multiselect("재추첨 후보자", cand, default=cand, key=f"redraw_cand_{lid}")
+                                    num_r = st.number_input("추첨 인원 수", 1, len(chosen), 1, key=f"redraw_num_{lid}")
+                                    if st.button("재추첨 실행", key=f"redraw_btn_{lid}", type="primary"):
+                                        run_draw(conn, lid, num_r, chosen)
+                                        st.success("재추첨 완료"); time.sleep(1); st.experimental_rerun()
+                                else:
+                                    st.warning("재추첨 후보가 없습니다.")
+                        else:
+                            st.info("완료된 추첨만 재추첨할 수 있습니다.")
+
+            except (IndexError, pd.errors.EmptyDataError):
+                 st.error("추첨을 찾을 수 없습니다."); st.session_state.view_mode = 'list'
+        
+        else: # 목록 보기
+            st.header("🎉 추첨 목록")
+            # ... (기존 목록 UI)
+
+    with col2: # 우측: 추첨 생성 메뉴
+        st.header("🖋️ 새 추첨 생성")
+        st.info("누구나 새로운 추첨을 만들 수 있습니다. 생성 시 설정한 비밀번호는 재추첨 시 필요하니 꼭 기억하세요.")
+        
+        with st.form("new_lottery_form", clear_on_submit=True):
+            title = st.text_input("추첨 제목")
+            password = st.text_input("추첨 관리 비밀번호 설정", type="password")
+            num_winners = st.number_input("당첨 인원 수", 1, 1)
+            draw_type = st.radio("추첨 방식", ["즉시 추첨", "예약 추첨"], horizontal=True)
+            if draw_type == "예약 추첨":
+                date = st.date_input("날짜", value=now_kst().date())
+                tm = st.time_input("시간 (HH:MM)", value=(now_kst() + datetime.timedelta(minutes=5)).time(), step=datetime.timedelta(minutes=1))
+                draw_time = datetime.datetime.combine(date, tm, tzinfo=KST)
+            else:
+                draw_time = now_kst()
+            participants_txt = st.text_area("참가자 명단 (한 줄에 한 명)", height=150)
+            
+            submitted = st.form_submit_button("✅ 추첨 생성", type="primary")
+
+            if submitted:
+                names = [n.strip() for n in participants_txt.split('\n') if n.strip()]
+                if not title or not names or not password:
+                    st.warning("제목, 비밀번호, 참가자를 모두 입력하세요.")
+                elif draw_type == "예약 추첨" and draw_time <= now_kst():
+                    st.error("예약 시간은 현재 이후여야 합니다.")
+                else:
+                    hashed_password = hash_password(password)
+                    c = conn.cursor()
+                    c.execute("INSERT INTO lotteries (title, draw_time, num_winners, status, password_hash) VALUES (?, ?, ?, 'scheduled', ?)",
+                              (title, draw_time, num_winners, hashed_password))
+                    lid = c.lastrowid
+                    for n in names: c.execute("INSERT INTO participants (lottery_id, name) VALUES (?, ?)", (lid, n))
+                    conn.commit()
+                    add_log(conn, lid, f"추첨 생성됨 (방식: {draw_type})")
+                    st.success("추첨 생성 완료"); time.sleep(1); st.experimental_rerun()
+
+    conn.close()
+
+if __name__ == "__main__":
+    main()
