@@ -151,7 +151,6 @@ def main():
                     with tabs[2]: # 관리 탭
                         st.subheader("추첨 관리")
                         
-                        # 슈퍼 관리자 기능
                         if st.session_state.super_admin_auth:
                             st.write("**슈퍼 관리자 기능: 추첨 삭제**")
                             st.warning(f"'{title}' 추첨의 모든 기록이 영구적으로 삭제됩니다.")
@@ -161,7 +160,6 @@ def main():
                                 st.session_state.view_mode = 'list'; st.session_state.selected_lottery_id = None
                                 st.success("삭제 완료"); time.sleep(1); st.experimental_rerun()
                         
-                        # 생성자 기능
                         if status == 'completed':
                             st.write("**생성자 기능: 재추첨**")
                             if not st.session_state.creator_auth.get(lid, False):
@@ -207,41 +205,42 @@ def main():
                             if st.button("상세보기", key=f"detail_btn_{row['id']}"):
                                 st.session_state.view_mode = 'detail'; st.session_state.selected_lottery_id = int(row['id']); st.experimental_rerun()
 
-    with col2: # 우측: 추첨 생성 메뉴
+    # ==================== 관리자 메뉴 (안정적인 로직으로 복원) ====================
+    with col2:
         st.header("🖋️ 새 추첨 생성")
         st.info("누구나 새로운 추첨을 만들 수 있습니다. 생성 시 설정한 비밀번호는 재추첨 시 필요하니 꼭 기억하세요.")
         
-        with st.form("new_lottery_form", clear_on_submit=True):
-            title = st.text_input("추첨 제목")
-            password = st.text_input("추첨 관리 비밀번호 설정", type="password")
-            num_winners = st.number_input("당첨 인원 수", 1, 1)
-            draw_type = st.radio("추첨 방식", ["즉시 추첨", "예약 추첨"], horizontal=True)
-            if draw_type == "예약 추첨":
-                date = st.date_input("날짜", value=now_kst().date())
-                tm = st.time_input("시간 (HH:MM)", value=(now_kst() + datetime.timedelta(minutes=5)).time(), step=datetime.timedelta(minutes=1))
-                draw_time = datetime.datetime.combine(date, tm, tzinfo=KST)
-            else:
-                draw_time = now_kst()
-            participants_txt = st.text_area("참가자 명단 (한 줄에 한 명)", height=150)
-            
-            submitted = st.form_submit_button("✅ 추첨 생성", type="primary")
+        title = st.text_input("추첨 제목", key="new_title")
+        password = st.text_input("추첨 관리 비밀번호 설정", type="password", key="new_password")
+        num_winners = st.number_input("당첨 인원 수", min_value=1, value=1, key="new_num_winners")
+        draw_type = st.radio("추첨 방식", ["즉시 추첨", "예약 추첨"], key="new_draw_type", horizontal=True)
 
-            if submitted:
-                names = [n.strip() for n in participants_txt.split('\n') if n.strip()]
-                if not title or not names or not password:
-                    st.warning("제목, 비밀번호, 참가자를 모두 입력하세요.")
-                elif draw_type == "예약 추첨" and draw_time <= now_kst():
-                    st.error("예약 시간은 현재 이후여야 합니다.")
-                else:
-                    hashed_password = hash_password(password)
-                    c = conn.cursor()
-                    c.execute("INSERT INTO lotteries (title, draw_time, num_winners, status, password_hash) VALUES (?, ?, ?, 'scheduled', ?)",
-                              (title, draw_time, num_winners, hashed_password))
-                    lid = c.lastrowid
-                    for n in names: c.execute("INSERT INTO participants (lottery_id, name) VALUES (?, ?)", (lid, n))
-                    conn.commit()
-                    add_log(conn, lid, f"추첨 생성됨 (방식: {draw_type})")
-                    st.success("추첨 생성 완료"); time.sleep(1); st.experimental_rerun()
+        if draw_type == "예약 추첨":
+            date = st.date_input("날짜", value=now_kst().date(), key="new_draw_date")
+            # 안정적인 시간 입력을 위해 세션 상태 사용
+            default_tm = st.session_state.get('new_draw_time', (now_kst() + datetime.timedelta(minutes=5)).time())
+            tm = st.time_input("시간 (HH:MM)", value=default_tm, key="new_draw_time", step=datetime.timedelta(minutes=1))
+            draw_time = datetime.datetime.combine(date, tm, tzinfo=KST)
+        else:
+            draw_time = now_kst()
+
+        participants_txt = st.text_area("참가자 명단 (한 줄에 한 명)", key="new_participants", height=150)
+        if st.button("✅ 추첨 생성", key="create_button", type="primary"):
+            names = [n.strip() for n in participants_txt.split('\n') if n.strip()]
+            if not title or not names or not password:
+                st.warning("제목, 비밀번호, 참가자를 모두 입력하세요.")
+            elif draw_type == "예약 추첨" and draw_time <= now_kst():
+                st.error("예약 시간은 현재 이후여야 합니다.")
+            else:
+                hashed_password = hash_password(password)
+                c = conn.cursor()
+                c.execute("INSERT INTO lotteries (title, draw_time, num_winners, status, password_hash) VALUES (?, ?, ?, 'scheduled', ?)",
+                          (title, draw_time, num_winners, hashed_password))
+                lid = c.lastrowid
+                for n in names: c.execute("INSERT INTO participants (lottery_id, name) VALUES (?, ?)", (lid, n))
+                conn.commit()
+                add_log(conn, lid, f"추첨 생성됨 (방식: {draw_type})")
+                st.success("추첨 생성 완료"); time.sleep(1); st.experimental_rerun()
 
     conn.close()
 
