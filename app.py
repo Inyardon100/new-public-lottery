@@ -234,7 +234,10 @@ def main():
         st.header("🖋️ 새 추첨 생성")
         title = st.text_input("추첨 제목", key="new_title")
         password = st.text_input("추첨 관리 비밀번호", type="password", key="new_password")
-        num_winners = st.number_input("당첨 인원 수", 1, 1, key="new_num_winners")
+        # ================== 당첨 인원 수 버그 수정 ==================
+        # 최대값을 1로 고정했던 오류를 수정합니다.
+        num_winners = st.number_input("당첨 인원 수", min_value=1, value=1, key="new_num_winners")
+        # =======================================================
         draw_type = st.radio("추첨 방식", ["즉시 추첨", "예약 추첨"], key="new_draw_type", horizontal=True)
         if draw_type == "예약 추첨":
             date = st.date_input("날짜", value=now_kst().date(), key="new_draw_date")
