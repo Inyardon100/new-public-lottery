@@ -99,6 +99,9 @@ def main():
     st.session_state.setdefault('creator_auth', {})
     st.session_state.setdefault('view_mode', 'list')
     st.session_state.setdefault('selected_lottery_id', None)
+    # ================== 페이지 번호 세션 상태 추가 ==================
+    st.session_state.setdefault('page_number', 1)
+    # ==========================================================
 
     st.title("📜 NEW LOTTERY")
     with st.expander("🔑 슈퍼 관리자 로그인"):
@@ -218,9 +221,24 @@ def main():
         else: # 목록 보기
             st.header("🎉 추첨 목록")
             df_lot = pd.read_sql("SELECT id, title, status FROM lotteries ORDER BY id DESC", conn)
-            if df_lot.empty: st.info("아직 생성된 추첨이 없습니다.")
+            if df_lot.empty:
+                st.info("아직 생성된 추첨이 없습니다.")
             else:
-                for _, row in df_lot.iterrows():
+                # ================== 페이지네이션 로직 시작 ==================
+                ITEMS_PER_PAGE = 10
+                total_items = len(df_lot)
+                total_pages = (total_items - 1) // ITEMS_PER_PAGE + 1
+
+                # 현재 페이지 번호가 범위를 벗어나면 조정
+                if st.session_state.page_number > total_pages:
+                    st.session_state.page_number = total_pages
+                
+                start_idx = (st.session_state.page_number - 1) * ITEMS_PER_PAGE
+                end_idx = start_idx + ITEMS_PER_PAGE
+                df_page = df_lot.iloc[start_idx:end_idx]
+
+                # 현재 페이지의 추첨 목록 표시
+                for _, row in df_page.iterrows():
                     with st.container(border=True):
                         list_col1, list_col2, list_col3 = st.columns([5, 2, 2])
                         status_emoji = "🟢 진행중" if row['status'] == 'scheduled' else "🏁 완료"
@@ -229,6 +247,23 @@ def main():
                         with list_col3:
                             if st.button("상세보기", key=f"detail_btn_{row['id']}"):
                                 st.session_state.view_mode = 'detail'; st.session_state.selected_lottery_id = int(row['id']); st.experimental_rerun()
+                
+                st.markdown("---")
+
+                # 페이지네이션 컨트롤러 (버튼 및 페이지 정보)
+                p_col1, p_col2, p_col3 = st.columns([3, 4, 3])
+                with p_col1:
+                    if st.button("◀ 이전", use_container_width=True, disabled=(st.session_state.page_number <= 1)):
+                        st.session_state.page_number -= 1
+                        st.experimental_rerun()
+                with p_col2:
+                    st.markdown(f"<p style='text-align: center; font-size: 18px;'><b>&lt; {st.session_state.page_number} / {total_pages} &gt;</b></p>", unsafe_allow_html=True)
+                with p_col3:
+                    if st.button("다음 ▶", use_container_width=True, disabled=(st.session_state.page_number >= total_pages)):
+                        st.session_state.page_number += 1
+                        st.experimental_rerun()
+                # ================== 페이지네이션 로직 끝 ==================
+
 
     with col2:
         st.header("🖋️ 새 추첨 생성")
